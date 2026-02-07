@@ -1,147 +1,115 @@
-const express = require('express')
-const mongoose = require('mongoose')
-const cors = require('cors')
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const NodeCache = require('node-cache');
+const axios = require('axios');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 
-const app = express()
-app.use(cors())
-app.use(express.json())
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '1mb' }));
+app.use(helmet());
+app.use(compression());
 
-const PORT = process.env.PORT || 3000
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/swgestor'
+// Basic protection
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  limit: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+}));
 
-/**
- * MODELOS
- */
-const ProjectSchema = new mongoose.Schema({
-  name: { type: String, required: true, maxlength: 80 },
-  description: { type: String, maxlength: 240 }
-}, { timestamps: true })
+const PORT = process.env.PORT || 3000;
 
-const TaskSchema = new mongoose.Schema({
-  projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true, index: true },
-  title: { type: String, required: true, maxlength: 120 },
-  description: { type: String, maxlength: 600 },
-  status: { type: String, enum: ['todo','doing','done'], default: 'todo', index: true },
-  priority: { type: String, enum: ['low','medium','high'], default: 'medium', index: true },
-  dueDate: { type: Date, default: null },
-  assignee: { type: String, default: '' }
-}, { timestamps: true })
+const SERVICES = {
+  projects: process.env.PROJECTS_SERVICE_URL || 'http://localhost:3001',
+  tasks: process.env.TASKS_SERVICE_URL || 'http://localhost:3002',
+  notifications: process.env.NOTIFICATIONS_SERVICE_URL || 'http://localhost:3003',
+};
 
-const Project = mongoose.model('Project', ProjectSchema)
-const Task = mongoose.model('Task', TaskSchema)
+const cache = new NodeCache({ stdTTL: 10 }); // 10s cache for hot endpoints
 
-function isValidObjectId(id){
-  return mongoose.Types.ObjectId.isValid(id)
-}
-
-/**
- * RUTAS
- */
-app.get('/api/health', (req, res) => res.json({ ok: true }))
-
-app.get('/api/stats', async (req, res) => {
-  const [projects, tasks, todo, doing, done] = await Promise.all([
-    Project.countDocuments(),
-    Task.countDocuments(),
-    Task.countDocuments({ status: 'todo' }),
-    Task.countDocuments({ status: 'doing' }),
-    Task.countDocuments({ status: 'done' })
-  ])
-  res.json({ projects, tasks, todo, doing, done })
-})
-
-/**
- * PROJECTS
- */
-app.get('/api/projects', async (req, res) => {
-  const projects = await Project.find().sort({ createdAt: -1 })
-  res.json(projects)
-})
-
-app.post('/api/projects', async (req, res) => {
-  try{
-    const project = new Project({ name: req.body.name, description: req.body.description })
-    await project.save()
-    res.status(201).json(project)
-  }catch(e){
-    res.status(400).json({ message: 'Datos inválidos', error: e.message })
-  }
-})
-
-app.get('/api/projects/:id', async (req, res) => {
-  const { id } = req.params
-  if (!isValidObjectId(id)) return res.status(400).json({ message:'ID inválido' })
-  const project = await Project.findById(id)
-  if (!project) return res.status(404).json({ message:'No encontrado' })
-  res.json(project)
-})
-
-/**
- * TASKS por proyecto
- */
-app.get('/api/projects/:id/tasks', async (req, res) => {
-  const { id } = req.params
-  if (!isValidObjectId(id)) return res.status(400).json({ message:'ID inválido' })
-  const tasks = await Task.find({ projectId: id }).sort({ createdAt: -1 })
-  res.json(tasks)
-})
-
-app.post('/api/projects/:id/tasks', async (req, res) => {
-  const { id } = req.params
-  if (!isValidObjectId(id)) return res.status(400).json({ message:'ID inválido' })
-  try{
-    const task = new Task({
-      projectId: id,
-      title: req.body.title,
-      description: req.body.description,
-      status: req.body.status,
-      priority: req.body.priority,
-      dueDate: req.body.dueDate || null,
-      assignee: req.body.assignee || ''
-    })
-    await task.save()
-    res.status(201).json(task)
-  }catch(e){
-    res.status(400).json({ message: 'Datos inválidos', error: e.message })
-  }
-})
-
-/**
- * TASKS global
- */
-app.put('/api/tasks/:taskId', async (req, res) => {
-  const { taskId } = req.params
-  if (!isValidObjectId(taskId)) return res.status(400).json({ message:'ID inválido' })
-  try{
-    const allowed = ['title','description','status','priority','dueDate','assignee']
-    const patch = {}
-    for (const k of allowed){
-      if (k in req.body) patch[k] = req.body[k]
+app.get('/api/health', async (req, res) => {
+  // quick health + downstream checks (best-effort)
+  const checks = await Promise.allSettled([
+    axios.get(`${SERVICES.projects}/health`, { timeout: 2000 }),
+    axios.get(`${SERVICES.tasks}/health`, { timeout: 2000 }),
+    axios.get(`${SERVICES.notifications}/health`, { timeout: 2000 }),
+  ]);
+  const status = {
+    ok: true,
+    gateway: true,
+    services: {
+      projects: checks[0].status === 'fulfilled',
+      tasks: checks[1].status === 'fulfilled',
+      notifications: checks[2].status === 'fulfilled',
     }
-    const updated = await Task.findByIdAndUpdate(taskId, patch, { new: true, runValidators: true })
-    if (!updated) return res.status(404).json({ message:'No encontrado' })
-    res.json(updated)
-  }catch(e){
-    res.status(400).json({ message: 'Datos inválidos', error: e.message })
-  }
-})
+  };
+  res.json(status);
+});
 
-app.delete('/api/tasks/:taskId', async (req, res) => {
-  const { taskId } = req.params
-  if (!isValidObjectId(taskId)) return res.status(400).json({ message:'ID inválido' })
-  const deleted = await Task.findByIdAndDelete(taskId)
-  if (!deleted) return res.status(404).json({ message:'No encontrado' })
-  res.json({ ok: true })
-})
+// Aggregated stats (cached)
+app.get('/api/stats', async (req, res) => {
+  const key = 'stats';
+  const hit = cache.get(key);
+  if (hit) return res.json({ ...hit, cached: true });
 
-async function start(){
   try{
-    await mongoose.connect(MONGODB_URI)
-    console.log('MongoDB connected:', MONGODB_URI)
-    app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`))
+    const [projects, tasksStats] = await Promise.all([
+      axios.get(`${SERVICES.projects}/projects`, { timeout: 5000 }),
+      axios.get(`${SERVICES.tasks}/stats`, { timeout: 5000 }),
+    ]);
+
+    const out = {
+      projects: projects.data.length,
+      tasks: tasksStats.data.tasks,
+      todo: tasksStats.data.todo,
+      doing: tasksStats.data.doing,
+      done: tasksStats.data.done,
+      cached: false,
+    };
+    cache.set(key, out);
+    res.json(out);
   }catch(e){
-    console.error('Failed to start server:', e.message)
-    process.exit(1)
+    res.status(502).json({ message: 'No fue posible consultar servicios', error: e.message });
   }
-}
-start()
+});
+
+// Proxy routes (microservices)
+// Projects
+app.use('/api/projects', createProxyMiddleware({
+  target: SERVICES.projects,
+  changeOrigin: true,
+  pathRewrite: { '^/api': '' },
+}));
+
+// Tasks
+app.use('/api/tasks', createProxyMiddleware({
+  target: SERVICES.tasks,
+  changeOrigin: true,
+  pathRewrite: { '^/api': '' },
+}));
+app.use('/api/projects/:projectId/tasks', createProxyMiddleware({
+  target: SERVICES.tasks,
+  changeOrigin: true,
+  pathRewrite: { '^/api': '' },
+}));
+
+// Notifications / Chat
+app.use('/api/chat', createProxyMiddleware({
+  target: SERVICES.notifications,
+  changeOrigin: true,
+  pathRewrite: { '^/api': '' },
+}));
+app.use('/api/notify', createProxyMiddleware({
+  target: SERVICES.notifications,
+  changeOrigin: true,
+  pathRewrite: { '^/api': '' },
+}));
+
+app.listen(PORT, () => console.log(`[gateway] running on http://localhost:${PORT}`));
+
+module.exports = app;

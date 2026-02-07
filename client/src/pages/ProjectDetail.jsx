@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useNavigate, useParams } from 'react-router-dom'
 import Modal from '../components/Modal'
+import ChatPanel from '../components/ChatPanel'
 
 const STATUS = ['todo','doing','done']
 const PRIORITY = ['low','medium','high']
@@ -25,6 +26,15 @@ function validateTask(values){
   if (values.status && !STATUS.includes(values.status)) errs.status = 'Estado inválido.'
   if (values.priority && !PRIORITY.includes(values.priority)) errs.priority = 'Prioridad inválida.'
   return errs
+}
+
+
+async function pushNotify(room, type, title, body=''){
+  try{
+    await api.post('/api/notify', { room, type, title, body })
+  }catch{
+    // ignore
+  }
 }
 
 export default function ProjectDetail(){
@@ -116,6 +126,8 @@ export default function ProjectDetail(){
       }
       setOpen(false)
       await load()
+      await pushNotify(`project:${id}`,'success','Tarea guardada', payload.title)
+      await pushNotify('global','info','Actualización','Se guardó una tarea')
     }catch(err){
       setErrs({ form:'No se pudo guardar. Revisa el backend y MongoDB.' })
     }finally{
@@ -128,6 +140,8 @@ export default function ProjectDetail(){
     try{
       await api.delete(`/api/tasks/${taskId}`)
       await load()
+      await pushNotify(`project:${id}`,'warning','Tarea eliminada', `ID: ${taskId}`)
+      await pushNotify('global','warning','Eliminación','Se eliminó una tarea')
     }catch(e){
       alert('No se pudo eliminar.')
     }
@@ -137,6 +151,7 @@ export default function ProjectDetail(){
     try{
       await api.put(`/api/tasks/${task._id}`, { status: next })
       setTasks(prev => prev.map(t => t._id === task._id ? { ...t, status: next } : t))
+      await pushNotify(`project:${id}`,'info','Cambio de estado', `${task.title} → ${next.toUpperCase()}`)
     }catch(e){
       alert('No se pudo actualizar el estado.')
     }
@@ -239,6 +254,8 @@ export default function ProjectDetail(){
           </tbody>
         </table>
       </div>
+
+      <ChatPanel room={`project:${id}`} defaultUser="Leonel" />
 
       {open && (
         <Modal title={editing?._id ? 'Editar tarea' : 'Nueva tarea'} onClose={()=>!saving && setOpen(false)}>

@@ -1,0 +1,12 @@
+{
+  "name": "sw-gestor-monorepo",
+  "private": true,
+  "version": "2.0.0",
+  "scripts": {
+    "dev:gateway": "npm --prefix server run dev",
+    "dev:projects": "npm --prefix server/services/projects run dev",
+    "dev:tasks": "npm --prefix server/services/tasks run dev",
+    "dev:notifications": "npm --prefix server/services/notifications run dev",
+    "dev:client": "npm --prefix client run dev"
+  }
+}

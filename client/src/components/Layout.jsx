@@ -1,16 +1,43 @@
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
+import { getSocket } from '../socket'
+import Toasts from './Toasts'
 
 export default function Layout(){
   const loc = useLocation()
   const navigate = useNavigate()
   const [q, setQ] = useState('')
+  const [toasts, setToasts] = useState([])
 
   const title = useMemo(() => {
     if (loc.pathname.startsWith('/projects/')) return 'Proyecto'
     if (loc.pathname.startsWith('/projects')) return 'Proyectos'
+    if (loc.pathname.startsWith('/chat')) return 'Chat'
     return 'Dashboard'
   }, [loc.pathname])
+
+  const removeToast = useCallback((id) => {
+    setToasts(prev => prev.filter(t => t.id !== id))
+  }, [])
+
+  useEffect(() => {
+    // Global notifications room
+    const socket = getSocket()
+    socket.emit('join', { room: 'global' })
+
+    const onNotify = (payload) => {
+      setToasts(prev => [
+        ...prev.slice(-4),
+        { id: crypto.randomUUID(), ...payload, ttl: 4500 }
+      ])
+    }
+
+    socket.on('notify', onNotify)
+    return () => {
+      socket.off('notify', onNotify)
+      socket.emit('leave', { room: 'global' })
+    }
+  }, [])
 
   function onSubmit(e){
     e.preventDefault()
@@ -33,12 +60,13 @@ export default function Layout(){
         <nav className="nav">
           <NavLink to="/" end className={({isActive}) => isActive ? 'active' : ''}>Dashboard</NavLink>
           <NavLink to="/projects" className={({isActive}) => isActive ? 'active' : ''}>Proyectos</NavLink>
+          <NavLink to="/chat" className={({isActive}) => isActive ? 'active' : ''}>Chat (Global)</NavLink>
         </nav>
 
         <div style={{marginTop: 'auto'}} className="helper">
           <div className="card" style={{padding:'12px', marginTop:'16px'}}>
             <h3 style={{marginBottom:'6px'}}>Tip</h3>
-            <p>Para el video: crea un proyecto y agrega tareas con fecha límite y prioridad.</p>
+            <p>Para el video: crea un proyecto, agrega tareas y abre el chat para ver notificaciones en tiempo real.</p>
           </div>
         </div>
       </aside>
@@ -56,6 +84,7 @@ export default function Layout(){
           </form>
         </div>
 
+        <Toasts toasts={toasts} onRemove={removeToast} />
         <Outlet />
       </main>
     </div>
